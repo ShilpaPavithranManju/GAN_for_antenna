@@ -1,0 +1,265 @@
+# Importing necessary libraries
+import tensorflow as tf
+import pandas as pd
+import seaborn as sns
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow.keras.layers import Normalization, Dense, InputLayer, LeakyReLU, BatchNormalization, Reshape
+from tensorflow.keras.losses import MeanSquaredError, Huber, MeanAbsoluteError
+from tensorflow.keras.metrics import RootMeanSquaredError
+from tensorflow.keras.optimizers.legacy import Adam
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.preprocessing import LabelEncoder
+
+# Load the dataset
+data = pd.read_csv("/content/real_data.csv")
+data_original = data
+
+# Split data into inputs (X) and outputs (y)
+X = data.iloc[:, 0:1]  # Select the first column ('operating_frequency') using .iloc for integer-location based indexing
+y = data.iloc[:, 1:]   # Select all columns except the first using .iloc
+
+# Normalize the data
+scaler_X = MinMaxScaler()
+scaler_y = MinMaxScaler()
+X_scaled = scaler_X.fit_transform(X)
+y_scaled = scaler_y.fit_transform(y)
+
+# Define the latent dimension for noise
+latent_dim = X_scaled.shape[1]
+
+from tensorflow.keras.layers import Dropout
+from tensorflow.keras.models import Sequential # Import the Sequential class
+from tensorflow.keras.layers import Dropout
+
+def build_generator(latent_dim, output_dim):
+    model = Sequential()
+    model.add(Dense(256, input_dim=latent_dim))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(BatchNormalization(momentum=0.8))
+    model.add(Dropout(0.3))
+
+    model.add(Dense(256))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(BatchNormalization(momentum=0.8))
+    model.add(Dropout(0.3))
+
+    model.add(Dense(256))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(BatchNormalization(momentum=0.8))
+    model.add(Dropout(0.3))
+
+    model.add(Dense(output_dim, activation='linear'))  # Output shape adjusted for patch dimensions
+    return model
+
+generator = build_generator(latent_dim, y_scaled.shape[1])
+generator.summary()
+
+def build_discriminator(input_shape):
+    model = Sequential()
+    model.add(Dense(512, input_dim=input_shape))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(Dense(256))
+    model.add(LeakyReLU(alpha=0.2))
+    model.add(Dense(1, activation='sigmoid'))  # Use sigmoid for binary classification
+    return model
+
+from tensorflow.keras.optimizers import Adam # Import Adam from tensorflow.keras.optimizers
+
+input_shape = y_scaled.shape[1]
+discriminator = build_discriminator(input_shape)
+discriminator.compile(loss='binary_crossentropy',
+                      optimizer=Adam(learning_rate=0.0002, beta_1=0.5), # Use the correct Adam import
+                      metrics=['accuracy'])
+
+# Build the GAN model
+discriminator.trainable = False
+GAN = Sequential()
+GAN.add(generator)
+GAN.add(discriminator)
+GAN.compile(loss='binary_crossentropy', optimizer=Adam(learning_rate=0.0002, beta_1=0.5)) # Use the correct Adam import
+
+def train_gan(gan, generator, discriminator, X_train, y_train, epochs, batch_size):
+    d_losses = []
+    g_losses = []
+    generator_mse = []
+
+    for epoch in range(epochs):
+        # Generate fake antenna parameters
+        noise = np.random.normal(0, 1, (batch_size, latent_dim))
+        gen_antenna_params = generator.predict(noise)
+
+        # Get a random set of real antenna parameters
+        idx = np.random.randint(0, y_train.shape[0], batch_size)
+        real_antenna_params = y_train[idx]
+
+        # Create labels for real and fake data
+        real_labels = np.ones((batch_size, 1)) * 0.9  # Label smoothing
+        fake_labels = np.zeros((batch_size, 1))
+
+        # Train the discriminator
+        d_loss_real = discriminator.train_on_batch(real_antenna_params, real_labels)
+        d_loss_fake = discriminator.train_on_batch(gen_antenna_params, fake_labels)
+        d_loss = 0.5 * np.add(d_loss_real[0], d_loss_fake[0])
+
+        # Train the generator
+        noise = np.random.normal(0, 1, (batch_size, latent_dim))
+        g_loss = gan.train_on_batch(noise, real_labels)
+
+        # Save the losses
+        d_losses.append(d_loss)
+        g_losses.append(g_loss)
+
+        # Calculate generator MSE
+        mse = np.mean(np.square(gen_antenna_params - real_antenna_params))
+        generator_mse.append(mse)
+
+        # Print the progress
+        if epoch % 100 == 0:
+            print(f"{epoch}/{epochs}, D Loss: {d_losses[-1]}, G Loss: {g_losses[-1]}, MSE: {mse}")
+
+    return d_losses, g_losses, generator_mse
+
+# Example usage
+epochs = 2000
+batch_size = 64
+d_losses, g_losses, generator_mse = train_gan(GAN, generator, discriminator, X_scaled, y_scaled, epochs, batch_size)
+
+# Import the matplotlib.pyplot module
+import matplotlib.pyplot as plt
+# Plot the discriminator and generator losses
+plt.figure(figsize=(10, 5))
+plt.plot(d_losses, label="Discriminator Loss")
+plt.plot(g_losses, label="Generator Loss")
+plt.xlabel("Epochs")
+plt.ylabel("Loss")
+plt.legend()
+plt.title("GAN Losses Over Epochs")
+plt.show()
+
+# Plot the generator MSE
+plt.figure(figsize=(10, 5))
+plt.plot(generator_mse, label="Generator MSE")
+plt.xlabel("Epochs")
+plt.ylabel("MSE")
+plt.legend()
+plt.title("Generator MSE Over Epochs")
+plt.show()
+
+# Calculate the accuracy of the discriminator
+def calculate_discriminator_accuracy(discriminator, X_test, y_test):
+    noise = np.random.normal(0, 1, (y_test.shape[0], latent_dim))
+    gen_antenna_params = generator.predict(noise)
+
+    real_labels = np.ones((y_test.shape[0], 1))
+    fake_labels = np.zeros((y_test.shape[0], 1))
+
+    real_accuracy = discriminator.evaluate(y_test, real_labels, verbose=0)[1]
+    fake_accuracy = discriminator.evaluate(gen_antenna_params, fake_labels, verbose=0)[1]
+
+    return 0.5 * (real_accuracy + fake_accuracy)
+
+# Calculate the accuracy
+accuracy = calculate_discriminator_accuracy(discriminator, X_scaled, y_scaled)
+print(f"Discriminator Accuracy: {accuracy}")
+
+# Use the trained generator to predict antenna parameters for a given operating frequency
+def predict_antenna_params(generator, frequency):
+    frequency_scaled = scaler_X.transform([[frequency]])
+    antenna_params_scaled = generator.predict(frequency_scaled)
+    antenna_params = scaler_y.inverse_transform(antenna_params_scaled)
+    return antenna_params
+
+# Combine losses into a DataFrame
+loss_data = {
+    'Epoch': list(range(1, epochs + 1)),
+    'Discriminator_Loss': d_losses,
+    'Generator_Loss': g_losses,
+    'Generator_MSE': generator_mse
+}
+
+loss_df = pd.DataFrame(loss_data)
+
+# Save to CSV
+csv_file_path = '/content/gan_losses.csv'
+loss_df.to_csv(csv_file_path, index=False)
+
+import numpy as np
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+from scipy.stats import ks_2samp, ttest_ind
+from sklearn.metrics import mean_squared_error
+
+# Step 1: Generate a batch of data
+def predict_antenna_params(generator, frequency, scaler_X, scaler_y, num_samples=100):
+    # Reshape the input to match the generator's expected input shape
+    frequency_scaled = scaler_X.transform([[frequency]])
+    frequency_scaled = np.repeat(frequency_scaled, num_samples, axis=0) # Repeat the input for num_samples times
+
+    antenna_params_scaled = generator.predict(frequency_scaled)
+    antenna_params = scaler_y.inverse_transform(antenna_params_scaled)
+    return antenna_params
+
+# Example frequency for which to generate data
+example_frequency = 15  # Replace with the desired frequency
+
+# Generate the antenna parameters
+generated_data = predict_antenna_params(generator, example_frequency, scaler_X, scaler_y)
+
+# Convert the generated data to a DataFrame
+generated_df = pd.DataFrame(generated_data, columns=["patch_width", "patch_length"])
+
+# Step 2: Visual Inspection
+# Plot distributions of real and generated data
+plt.figure(figsize=(12, 6))
+plt.subplot(1, 2, 1)
+# Check if 'Patch width' is the actual column name in the 'data' DataFrame
+sns.histplot(data["Patch width"], kde=True, color='blue', label='Real Data')
+sns.histplot(generated_df["patch_width"], kde=True, color='orange', label='Generated Data')
+plt.title('Patch Width Distribution')
+plt.legend()
+
+plt.subplot(1, 2, 2)
+# Check if 'Patch length' is the actual column name in the 'data' DataFrame
+sns.histplot(data["Patch length"], kde=True, color='blue', label='Real Data')
+sns.histplot(generated_df["patch_length"], kde=True, color='orange', label='Generated Data')
+plt.title('Patch Length Distribution')
+plt.legend()
+
+plt.show()
+
+# Save the trained models
+generator.save('/content/generator_model.h5')
+discriminator.save('/content/discriminator_model.h5')
+GAN.save('/content/gan_model.h5')
+
+print("Models saved successfully.")
+
+from tensorflow.keras.models import load_model
+
+# Load the GAN model
+gan_model = load_model('/content/gan_model.h5')
+
+# Print the summary of the GAN model
+gan_model.summary()
+
+import os
+
+# Function to save weights and biases
+def save_layer_parameters(model, save_dir):
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+
+    for i, layer in enumerate(model.layers):
+        if isinstance(layer, tf.keras.layers.Dense):
+            weights = layer.get_weights()[0]
+            biases = layer.get_weights()[1]
+            np.savetxt(os.path.join(save_dir, f'dense_{i}_weights.csv'), weights, delimiter=',')
+            np.savetxt(os.path.join(save_dir, f'dense_{i}_biases.csv'), biases, delimiter=',')
+
+# Example usage to save generator and discriminator layers
+save_layer_parameters(generator, '/content/generator_layers')
+save_layer_parameters(discriminator, '/content/discriminator_layers')
+
+print("Layer parameters saved successfully.")
